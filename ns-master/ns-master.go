@@ -49,23 +49,3 @@ func nameserversHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 }
-
-func parseNameserverList(nameserverList string) []string {
-	nameservers := make([]string, 0)
-	for _, ns := range splitAndTrim(nameserverList, ",") {
-		nameservers = append(nameservers, ns)
-	}
-	return nameservers
-}
-
-func splitAndTrim(str, sep string) []string {
-	values := make([]string, 0)
-	items := strings.Split(str, sep)
-	for _, item := range items {
-		trimmed := strings.TrimSpace(item)
-		if trimmed != "" {
-			values = append(values, trimmed)
-		}
-	}
-	return values
-}
