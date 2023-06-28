@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"flag"
 	"log"
+	"math"
 	"net"
 	"net/http"
 	"os"
@@ -37,6 +38,12 @@ var (
 	search            = "localhost"
 	httpClient        http.Client
 )
+
+type latencyResult struct {
+	err        error
+	nameserver string
+	latency    time.Duration
+}
 
 func main() {
 	// 解析命令行参数
@@ -91,15 +98,16 @@ func run() {
 		}
 
 		// 检测并排序nameservers
-		sortedNameservers := sortNameservers(nameservers)
+		sortedNameservers, latencyResults := sortNameservers(nameservers)
+		bestNameservers := getMaxNameservers(sortedNameservers)
 
 		// 写回resolv.conf
-		err = writeResolvConf(sortedNameservers)
+		err = writeResolvConf(bestNameservers)
 		if err != nil {
 			log.Println("Failed to write resolv.conf:", err)
 		}
-
-		log.Println("Nameserver detection completed, best nameservers are", sortedNameservers[:maxNameservers])
+		log.Printf("Nameserver info %#v", latencyResults)
+		log.Println("Nameserver detection completed, best nameservers are", bestNameservers)
 
 		// 间隔一段时间后再次执行检测
 		time.Sleep(interval)
@@ -201,26 +209,25 @@ func fetchNameserversFromEndpoint(url string) ([]string, string, error) {
 	return data.Nameservers, data.EndpointURL, nil
 }
 
-func sortNameservers(nameservers []string) []string {
-	type latencyResult struct {
-		nameserver string
-		latency    time.Duration
-	}
+func sortNameservers(nameservers []string) ([]string, []latencyResult) {
 
 	results := make([]latencyResult, 0, len(nameservers))
+	latencyResults := make([]latencyResult, 0)
 
 	// 并发检测nameserver延迟
 	resultChan := make(chan latencyResult, len(nameservers))
 	for _, ns := range nameservers {
 		go func(nameserver string) {
-			latency := measureLatency(nameserver)
-			resultChan <- latencyResult{nameserver: nameserver, latency: latency}
+			latency, err := measureLatency(nameserver)
+			resultChan <- latencyResult{err: err, nameserver: nameserver, latency: latency}
 		}(ns)
 	}
 
 	for range nameservers {
 		result := <-resultChan
-		results = append(results, result)
+		if result.err == nil {
+			results = append(results, result)
+		}
 	}
 
 	// 根据延迟排序nameservers
@@ -230,24 +237,31 @@ func sortNameservers(nameservers []string) []string {
 
 	sortedNameservers := make([]string, 0, len(results))
 	for _, result := range results {
-		if result.latency > nsTimeout {
-			break
-		}
+		latencyResults = append(latencyResults, result)
 		sortedNameservers = append(sortedNameservers, result.nameserver)
 	}
 
-	return sortedNameservers
+	return sortedNameservers, latencyResults
 }
 
-func measureLatency(nameserver string) time.Duration {
+func getMaxNameservers(nameservers []string) []string {
+	if len(nameservers) >= maxNameservers {
+		return nameservers[:maxNameservers]
+	}
+	return nameservers
+}
+
+func measureLatency(nameserver string) (time.Duration, error) {
 	startTime := time.Now()
 
 	conn, err := net.DialTimeout("tcp", nameserver+":53", nsTimeout)
-	if err == nil {
-		conn.Close()
+	if err != nil {
+		// conn.Close()
+		log.Printf("Nameserver %s healthy check: %v", nameserver, err)
+		return math.MaxInt64, err
 	}
-
-	return time.Since(startTime)
+	conn.Close()
+	return time.Since(startTime), nil
 }
 
 func writeResolvConf(nameservers []string) error {
@@ -258,10 +272,7 @@ func writeResolvConf(nameservers []string) error {
 	defer file.Close()
 
 	// 写入nameservers
-	for i, ns := range nameservers {
-		if i >= maxNameservers {
-			break
-		}
+	for _, ns := range nameservers {
 		_, err := file.WriteString("nameserver " + ns + "\n")
 		if err != nil {
 			return err
