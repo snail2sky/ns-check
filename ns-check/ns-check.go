@@ -17,6 +17,7 @@ import (
 )
 
 const (
+	defaultLogFile           = "./ns-check.log"
 	defaultResolvConfPath    = "/etc/resolv.conf"
 	defaultEndpointURL       = "http://127.0.0.1:5353/nameservers"
 	defaultDefaultNameserver = "8.8.8.8,8.8.4.4,1.1.1.1"
@@ -27,6 +28,8 @@ const (
 )
 
 var (
+	logger            log.Logger
+	logFile           string
 	resolvConfPath    string
 	endpointURL       string
 	defaultNameserver string
@@ -36,7 +39,8 @@ var (
 	maxNameservers    int
 	options           = "timeout:1 attempts:1"
 	search            = "localhost"
-	httpClient        http.Client
+
+	httpClient http.Client
 )
 
 type latencyResult struct {
@@ -45,10 +49,17 @@ type latencyResult struct {
 	latency    time.Duration
 }
 
-func main() {
+func init() {
 	// 解析命令行参数
 	parseFlags()
+	f, err := os.Create(logFile)
+	if err != nil {
+		log.Panic(err)
+	}
+	logger = *log.New(f, "ns-check", log.Llongfile)
+}
 
+func main() {
 	// 监听系统信号，用于优雅地退出
 	setupSignalHandler()
 
@@ -60,6 +71,7 @@ func main() {
 }
 
 func parseFlags() {
+	flag.StringVar(&logFile, "log-file", defaultLogFile, "Path to log file")
 	flag.StringVar(&resolvConfPath, "resolv-conf", defaultResolvConfPath, "Path to resolv.conf file")
 	flag.StringVar(&endpointURL, "endpoint-url", defaultEndpointURL, "URL for fetching nameservers if resolv.conf is unavailable")
 	flag.StringVar(&defaultNameserver, "default-nameserver", defaultDefaultNameserver, "Default nameserver fallback")
@@ -79,7 +91,7 @@ func setupSignalHandler() {
 
 	go func() {
 		<-signalChan
-		log.Println("Received termination signal. Exiting...")
+		logger.Println("Received termination signal. Exiting...")
 		os.Exit(0)
 	}()
 }
@@ -91,9 +103,9 @@ func run() {
 	for {
 		// 收集nameservers
 		nameservers, err := collectNameservers()
-		log.Println("Collect nameservers are", nameservers)
+		logger.Println("Collect nameservers are", nameservers)
 		if err != nil {
-			log.Println("Failed to collect nameservers:", err)
+			logger.Println("Failed to collect nameservers:", err)
 			continue
 		}
 
@@ -104,10 +116,10 @@ func run() {
 		// 写回resolv.conf
 		err = writeResolvConf(bestNameservers)
 		if err != nil {
-			log.Println("Failed to write resolv.conf:", err)
+			logger.Println("Failed to write resolv.conf:", err)
 		}
-		log.Printf("Nameserver info %#v", latencyResults)
-		log.Println("Nameserver detection completed, best nameservers are", bestNameservers)
+		logger.Printf("Nameserver info %#v", latencyResults)
+		logger.Println("Nameserver detection completed, best nameservers are", bestNameservers)
 
 		// 间隔一段时间后再次执行检测
 		time.Sleep(interval)
@@ -137,24 +149,24 @@ func collectNameservers() ([]string, error) {
 	// 尝试从resolv.conf中读取nameservers
 	nameservers, err := readNameserversFromResolvConf()
 	if err == nil && len(nameservers) > 0 {
-		log.Println("Collect nameservers from resolv.conf are", nameservers)
+		logger.Println("Collect nameservers from resolv.conf are", nameservers)
 		addNameservers(nameservers, nameserverSet)
 	} else {
-		log.Println("Collect nameserver from resolv.conf failed:", err)
+		logger.Println("Collect nameserver from resolv.conf failed:", err)
 	}
 
 	// 从endpointURL获取nameservers
 	lastEndpointURL := endpointURL
 	nameservers, endpointURL, err = fetchNameserversFromEndpoint(endpointURL)
 	if err == nil && len(nameservers) > 0 {
-		log.Printf("Collect nameservers from endpoint url %s are %v, new endpoint url is %s", lastEndpointURL, nameservers, endpointURL)
+		logger.Printf("Collect nameservers from endpoint url %s are %v, new endpoint url is %s", lastEndpointURL, nameservers, endpointURL)
 		addNameservers(nameservers, nameserverSet)
 	} else {
-		log.Println("Collect nameserver from endpoint url failed:", err)
+		logger.Println("Collect nameserver from endpoint url failed:", err)
 	}
 
 	defaultNameservers := getDefaultNameservers(defaultNameserver)
-	log.Println("Collect nameservers from default are", defaultNameservers)
+	logger.Println("Collect nameservers from default are", defaultNameservers)
 	addNameservers(defaultNameservers, nameserverSet)
 	// 返回默认的fallback nameserver
 	return getNameservers(nameserverSet), nil
@@ -256,8 +268,7 @@ func measureLatency(nameserver string) (time.Duration, error) {
 
 	conn, err := net.DialTimeout("tcp", nameserver+":53", nsTimeout)
 	if err != nil {
-		// conn.Close()
-		log.Printf("Nameserver %s healthy check: %v", nameserver, err)
+		logger.Printf("Nameserver %s healthy check: %v", nameserver, err)
 		return math.MaxInt64, err
 	}
 	conn.Close()
